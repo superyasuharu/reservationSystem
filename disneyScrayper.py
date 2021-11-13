@@ -10,7 +10,7 @@ import time
 import traceback
 from reserveInfo import DateInfo, NStayInfo, PersonInfo, PeopleInfo, HotelInfo, ReserveInfo, TicketInfo
 from config import ConfigInfo
-from util import IsBusyException, IsErrorException
+from util import IsBusyException, IsErrorException, IsAccessDeniedException
 
 
 class DisneyScraper:
@@ -23,13 +23,17 @@ class DisneyScraper:
         options.add_argument('--incognito')
         options.add_argument('--enable-quic')
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        userAgent = "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "\
+                    "(KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36"
+        options.add_argument(userAgent)
+
         # options.headless = True
 
         self.driver = webdriver.Chrome(executable_path=driver_path, chrome_options=options)
         self.driver.set_page_load_timeout(30)
         self.action = ActionInWebWithWait(self.driver)
         self.inputReserveInformation = InputReserveInformation(self.driver, self.action)
-        self.max_tab_num = 10
+        self.max_tab_num = 100
 
         self.login_mailAddress = configInfo.loginInfo.mailAdress
         self.login_password = configInfo.loginInfo.password
@@ -37,7 +41,7 @@ class DisneyScraper:
 
         self.xml_noResult = '[@class="noResultView"]'
         self.xml_hotelResult = '[@class="cards"]'
-        self.closed_window = set()
+        self.reserveTopPage = "https://reserve.tokyodisneyresort.jp/"
 
     def __del__(self):
         try:
@@ -145,6 +149,36 @@ class DisneyScraper:
 
         return message
 
+    def _get_vacationPackage_info_directly(self, reserveInfo: ReserveInfo):
+        roomsNum = reserveInfo.hotelInfo.roomNum
+        adultNum = reserveInfo.peopleInfo.adultNum
+        childNum = reserveInfo.peopleInfo.childNum
+        stayingDays = reserveInfo.nStay
+        useDate = f"{reserveInfo.dateInfo.year:02}{reserveInfo.dateInfo.month:02}{reserveInfo.dateInfo.day:02}"
+        if childNum == 0:
+            childAgeBedInform = ""
+        else:
+            childAgeBedInform = "03_3%7C00_3%7C"
+
+        self.action.get(self.reserveTopPage)
+        xml_vacationPackageIcon = '[@class="iconPk"]'
+        self.action.click_by_xpath(xml_vacationPackageIcon)
+        xml_dateIcon = '[@class="iconDateBl"]'
+        self.action.click_by_xpath(xml_dateIcon)
+        time.sleep(1)
+        self.inputReserveInformation(reserveInfo, reservationType="vp")
+        message = self._get_vacationPackageSearchResult()
+        if message is not None:
+            return message
+
+        url = f"https://reserve.tokyodisneyresort.jp/vp/list/"\
+              f"?useDate={useDate}&stayingDays={stayingDays}&roomsNum={roomsNum}&"\
+              f"adultNum={adultNum}&childNum={childNum}&childAgeBedInform={childAgeBedInform}"
+
+        message = self._retry_action_when_busy(url, self._get_vacationPackageSearchResult, self._is_loadingTicketResult_page)
+
+        return message
+
     def _get_hotel_info_directly(self, reserveInfo: ReserveInfo):
         roomsNum = reserveInfo.hotelInfo.roomNum
         adultNum = reserveInfo.peopleInfo.adultNum
@@ -166,6 +200,37 @@ class DisneyScraper:
         message = self._retry_action_when_busy(url, self._get_hotelSearchResult, self._is_loadingHotelResult_page)
         return message
 
+    def _get_vacationPackageSearchResult(self):
+        # xml_contents = '[@id="tabCont1"]'
+        # element = self.action.get_element_by_xpath(xml_contents)
+        # print(element.text)
+        tag_content = "dl"
+        elements = self.action.get_elements_by_tag(tag_content)
+        message = ""
+        is_able_to_reserve = False
+        for element in elements:
+            if element.text != "":
+                if "0円" in element.text:
+                    message += f"\n{element.text.replace('比較','')}"
+                    is_able_to_reserve = True
+        if is_able_to_reserve:
+            price_xml = '[@class="price"]'
+            element = self.action.click_by_xpath(price_xml)
+            goto_hotel_xml = '[@class="getPopupFromDateScreen"]'
+            element = self.action.click_by_xpath(goto_hotel_xml)
+            xpath_hotel = '[@class="boxHotel04 js-accordion"]'
+            elements = self.action.get_elements_by_xpath(xpath_hotel)
+            message = ''
+            for idx, element in enumerate(elements):
+                if "円" in element.text:
+                    if "ホテル" in element.text:
+                        message += f"\n{element.text}\n"
+                    else:
+                        message += f"・{element.text}\n"
+                    print(f"{element.text}")
+
+        return message
+
     def _retry_action_when_busy(self, url, get_result_function, is_loading_function):
 
         self._retry_cnt = 0
@@ -180,7 +245,8 @@ class DisneyScraper:
 
         except IsBusyException:
             is_busy = True
-            # return
+        except IsAccessDeniedException:
+            self.action.get(self.reserveTopPage)
         except BaseException as e:
             print(e)
             return
@@ -206,7 +272,7 @@ class DisneyScraper:
                         self.action.get(url)
                         if not self.action._busy_check():
                             break
-                        time.sleep(0.5)
+                        time.sleep(1.0)
 
                 except IsBusyException as e:
                     # ビジーだった結果のタブは閉じる
@@ -240,7 +306,6 @@ class DisneyScraper:
     def _close_currentWindow(self):
         current_window_handle = self.driver.current_window_handle
         if self.src_window_handle != current_window_handle:
-            self.closed_window.add(current_window_handle)
             self.driver.close()
             window_handles = self.driver.window_handles
             self.driver.switch_to.window(window_handles[0])
@@ -345,11 +410,11 @@ class InputReserveInformation(InputInfo):
         self._inputNroom = InputNroom(driver, actionInWebWithWait)
         self._inputHotel = InputHotel(driver, actionInWebWithWait)
 
-    def __call__(self, reserveInfo: ReserveInfo):
+    def __call__(self, reserveInfo: ReserveInfo, reservationType="hotel"):
 
         self._inputReserveDate(reserveInfo.dateInfo)
         self._inputNstay(reserveInfo.nStay)
-        self._inputNperson(reserveInfo.peopleInfo)
+        self._inputNperson(reserveInfo.peopleInfo, reservationType)
         self._inputNroom(reserveInfo.hotelInfo.roomNum)
         self._inputHotel(reserveInfo.hotelInfo.hotelName)
 
@@ -378,22 +443,30 @@ class InputHotel(InputInfo):
 
 
 class InputNperson(InputInfo):
-    def __call__(self, peopleInfo: PeopleInfo):
+    def __call__(self, peopleInfo: PeopleInfo, reservationType):
         self._input_nadult(peopleInfo.adultNum)
-        self._input_nchild(peopleInfo.childInfoList)
+        self._input_nchild(peopleInfo.childInfoList, reservationType)
 
     def _input_nadult(self, adultNum: int):
         xpath_inputAdultNum = '[@id="adultNum"]'
         self.action.select_element_from_visibleText_by_xpath(xpath_inputAdultNum, adultNum)
 
-    def _input_nchild(self, childInfoList: list):
+    def _input_nchild(self, childInfoList: list, reservationType):
         xpath_inputChildNum = '[@id="childNum"]'
         childrenNum = len(childInfoList)
         self.action.select_element_from_visibleText_by_xpath(xpath_inputChildNum, childrenNum)
         for childIdx, childInfo in enumerate(childInfoList):
-            xpath_inputChildAge = f'[@class="childNumSelect hotelChildAge_{childIdx+1}"]'
+            if reservationType == "hotel":
+                xpath_inputChildAge = f'[@class="childNumSelect hotelChildAge_{childIdx+1}"]'
+            elif reservationType == "vp":
+                xpath_inputChildAge = f'[@class="childNumSelect packageChildAge_{childIdx+1}"]'
+            else:
+                raise ValueError(f"{reservationType} is not correct value.")
+
             childAge = childInfo.age
             self.action.select_element_from_visibleText_by_xpath(xpath_inputChildAge, childAge)
+            if reservationType == "vp":
+                continue
             if childInfo.age_numeric == 0:
                 continue
             if childInfo.isNeedBed:
@@ -489,11 +562,31 @@ class ActionInWebWithWait:
             # self.driver.quit()
 
         self._noName_check()
+        self._access_denied()
 
         if element is None:
             raise Exception(f"couldnt get correct element.{self.driver.current_url}--{xpath}")
 
         return element
+
+    def get_elements_by_tag(self, tag):
+
+        self._busy_check()
+
+        elements = None
+        try:
+            self.wait.until(EC.presence_of_element_located((By.TAG_NAME, tag)))
+            elements = self.driver.find_elements_by_tag_name(tag)
+        except BaseException as e:
+            print(e)
+            print(traceback.format_exc())
+
+        self._noName_check()
+        self._access_denied()
+        if elements is None:
+            raise Exception(f"couldnt get correct element.{self.driver.current_url}--{tag}")
+
+        return elements
 
     def get_elements_by_xpath(self, xpath, isFullXpath=False):
 
@@ -512,6 +605,7 @@ class ActionInWebWithWait:
             print(traceback.format_exc())
             # self.driver.quit()
         self._noName_check()
+        self._access_denied()
         if elements is None:
             raise Exception(f"couldnt get correct element.{self.driver.current_url}--{xpath}")
 
@@ -540,6 +634,7 @@ class ActionInWebWithWait:
 
         self._error_check()
         self._noName_check()
+        self._access_denied()
 
         return element
 
@@ -565,6 +660,7 @@ class ActionInWebWithWait:
 
         self._error_check()
         self._noName_check()
+        self._access_denied()
         element.send_keys(inputKey)
         return element
 
@@ -597,8 +693,14 @@ class ActionInWebWithWait:
         if title == "無題":
             raise IsBusyException(f"couldnt open correct page.")
 
+    def _access_denied(self):
+        title = self.driver.title
+        if title == "Access Denied":
+            raise IsAccessDeniedException(f"Access Denied page.")
+
     def get(self, url):
         self.driver.get(url)
         self._busy_check()
         self._error_check()
         self._noName_check()
+        self._access_denied()
