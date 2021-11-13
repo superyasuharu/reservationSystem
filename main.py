@@ -4,6 +4,7 @@ import time
 import yaml
 import argparse
 from pathlib import Path
+import datetime
 
 from disneyScrayper import DisneyScraper
 from reserveInfo import get_reserveInfo, get_ticketInfo
@@ -71,13 +72,22 @@ def load_configInfo(yamlDir: Path, configYamlName: str):
     return configInfo
 
 
-def scrape_reseveInfoList(alertReserveStatus: AlertReserveStatus, reserveInfoList: list, configInfo: ConfigInfo, driverPath: Path):
+def scrape_reseveInfoList(
+        alertReserveHotelStatus: AlertReserveStatus,
+        alertReserveVPStatus: AlertReserveStatus,
+        reserveInfoList: list,
+        configInfo: ConfigInfo,
+        driverPath: Path):
 
     for reserveInfo in reserveInfoList:
         disneyScraper = DisneyScraper(configInfo, driverPath)
         message = disneyScraper._get_hotel_info_directly(reserveInfo)
         if message is not None:
-            alertReserveStatus.alert_hotelInfo_to_LINE(reserveInfo, message)
+            alertReserveHotelStatus.alert_hotelInfo_to_LINE(reserveInfo, message)
+
+        message = disneyScraper._get_vacationPackage_info_directly(reserveInfo)
+        if message is not None:
+            alertReserveVPStatus.alert_vpInfo_to_LINE(reserveInfo, message)
 
         del disneyScraper
 
@@ -106,13 +116,17 @@ def main():
     configInfo = load_configInfo(yamlDir, configYamlName)
 
     iterN = 0
-    alertReserveStatus = AlertReserveStatus(configInfo, reserveInfo_List)
+    alertReserveHotelStatus = AlertReserveStatus(configInfo, reserveInfo_List)
+    alertReserveVPStatus = AlertReserveStatus(configInfo, reserveInfo_List)
     while True:
-        iterN += 1
-        now = datetime.datetime.now(pytz.timezone('Asia/Tokyo'))
-        print(f"{iterN}回目の調査開始: {now}")
-        scrape_ticketInfoList(alertReserveStatus, ticketInfo_List, configInfo, args.driverPath)
-        scrape_reseveInfoList(alertReserveStatus, reserveInfo_List, configInfo, args.driverPath)
+        dt_now = datetime.datetime.now()
+        hour = dt_now.hour
+        if hour >= 14:
+            iterN += 1
+            now = datetime.datetime.now(pytz.timezone('Asia/Tokyo'))
+            print(f"{iterN}回目の調査開始: {now}")
+            scrape_ticketInfoList(alertReserveHotelStatus, ticketInfo_List, configInfo, args.driverPath)
+            scrape_reseveInfoList(alertReserveHotelStatus, alertReserveVPStatus, reserveInfo_List, configInfo, args.driverPath)
 
         min01 = 60 * 1
         time.sleep(min01)

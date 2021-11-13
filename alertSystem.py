@@ -23,6 +23,17 @@ class AlertReserveStatus:
                 message_w_date = message_w_date + "空室は存在しません"
             self.lineActor.line_ntfy(message_w_date)
 
+    def alert_vpInfo_to_LINE(self, reserveInfo: ReserveInfo, message: str):
+        if self.lastMessageDict[reserveInfo] != message:
+            self.lastMessageDict[reserveInfo] = message
+            message_w_date = f"\n【{reserveInfo.dateInfo.year}/{reserveInfo.dateInfo.month}/{reserveInfo.dateInfo.day}の"\
+                f"{reserveInfo.hotelInfo.roomNum}部屋のバケーションパッケージの空室情報】\n"
+            if message != '':
+                message_w_date = message_w_date + message
+            else:
+                message_w_date = message_w_date + "バケーションパッケージの空室は存在しません"
+            self.lineActor.line_ntfy(message_w_date)
+
     def alert_ticketInfo_to_LINE(self, ticketInfo: TicketInfo, message: str):
         parkNameDict = {1: "ランド", 2: "シー"}
         parkName = parkNameDict[ticketInfo.parkIndex]
